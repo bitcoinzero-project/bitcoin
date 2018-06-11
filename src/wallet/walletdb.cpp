@@ -95,7 +95,7 @@ bool CWalletDB::WriteCryptedKey(const CPubKey& vchPubKey,
     nWalletDBUpdateCounter++;
 
     if (!Write(std::make_pair(std::string("keymeta"), vchPubKey),
-            keyMeta))
+               keyMeta))
         return false;
 
     if (!Write(std::make_pair(std::string("ckey"), vchPubKey), vchCryptedSecret, false))
@@ -204,6 +204,16 @@ bool CWalletDB::WriteAccountingEntry_Backend(const CAccountingEntry& acentry)
     return WriteAccountingEntry(++nAccountingEntryNumber, acentry);
 }
 
+bool CWalletDB::WriteSpecificBlindingKey(const CScriptID& scriptid, const uint256& key)
+{
+    return Write(make_pair(std::string("specificblindingkey"), scriptid), key);
+}
+
+bool CWalletDB::WriteBlindingDerivationKey(const uint256& key)
+{
+    return Write(std::string("blindingderivationkey"), key);
+}
+
 CAmount CWalletDB::GetAccountCreditDebit(const string& strAccount)
 {
     list<CAccountingEntry> entries;
@@ -211,7 +221,7 @@ CAmount CWalletDB::GetAccountCreditDebit(const string& strAccount)
 
     CAmount nCreditDebit = 0;
     BOOST_FOREACH (const CAccountingEntry& entry, entries)
-        nCreditDebit += entry.nCreditDebit;
+    nCreditDebit += entry.nCreditDebit;
 
     return nCreditDebit;
 }
@@ -465,15 +475,15 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             CTxDestination keyID;
             if (strType == "keymeta")
             {
-              CPubKey vchPubKey;
-              ssKey >> vchPubKey;
-              keyID = vchPubKey.GetID();
+                CPubKey vchPubKey;
+                ssKey >> vchPubKey;
+                keyID = vchPubKey.GetID();
             }
             else if (strType == "watchmeta")
             {
-              CScript script;
-              ssKey >> *(CScriptBase*)(&script);
-              keyID = CScriptID(script);
+                CScript script;
+                ssKey >> *(CScriptBase*)(&script);
+                keyID = CScriptID(script);
             }
 
             CKeyMetadata keyMeta;
@@ -536,6 +546,36 @@ ReadKeyValue(CWallet* pwallet, CDataStream& ssKey, CDataStream& ssValue,
             if (!pwallet->SetHDChain(chain, true))
             {
                 strErr = "Error reading wallet database: SetHDChain failed";
+                return false;
+            }
+        }
+            /* Only for backward compatibility with older wallets. */
+        else if (strType == "blindingkey")
+        {
+            assert(!pwallet->blinding_key.IsValid());
+            std::vector<unsigned char> vchBlindingKey;
+            ssValue >> vchBlindingKey;
+            pwallet->blinding_key.Set(vchBlindingKey.begin(), vchBlindingKey.end(), true);
+            if (!pwallet->blinding_key.IsValid()) {
+                strErr = "Error reading wallet blinding key";
+                return false;
+            }
+        }
+        else if (strType == "blindingderivationkey")
+        {
+            assert(pwallet->blinding_derivation_key.IsNull());
+            uint256 key;
+            ssValue >> key;
+            pwallet->blinding_derivation_key = key;
+        }
+        else if (strType == "specificblindingkey")
+        {
+            CScriptID scriptid;
+            ssKey >> scriptid;
+            uint256 key;
+            ssValue >> key;
+            if (!pwallet->LoadSpecificBlindingKey(scriptid, key)) {
+                strErr = "Error reading wallet database: LoadSpecificBlindingKey failed";
                 return false;
             }
         }
@@ -631,14 +671,14 @@ DBErrors CWalletDB::LoadWallet(CWallet* pwallet)
     LogPrintf("nFileVersion = %d\n", wss.nFileVersion);
 
     LogPrintf("Keys: %u plaintext, %u encrypted, %u w/ metadata, %u total\n",
-           wss.nKeys, wss.nCKeys, wss.nKeyMeta, wss.nKeys + wss.nCKeys);
+              wss.nKeys, wss.nCKeys, wss.nKeyMeta, wss.nKeys + wss.nCKeys);
 
     // nTimeFirstKey is only reliable if all keys have metadata
     if ((wss.nKeys + wss.nCKeys + wss.nWatchKeys) != wss.nKeyMeta)
         pwallet->UpdateTimeFirstKey(1);
 
     BOOST_FOREACH(uint256 hash, wss.vWalletUpgrade)
-        WriteTx(pwallet->mapWallet[hash]);
+    WriteTx(pwallet->mapWallet[hash]);
 
     // Rewrite encrypted wallets of versions 0.4.0 and 0.5.0rc:
     if (wss.fIsEncrypted && (wss.nFileVersion == 40000 || wss.nFileVersion == 50000))
@@ -654,6 +694,17 @@ DBErrors CWalletDB::LoadWallet(CWallet* pwallet)
     ListAccountCreditDebit("*", pwallet->laccentries);
     BOOST_FOREACH(CAccountingEntry& entry, pwallet->laccentries) {
         pwallet->wtxOrdered.insert(make_pair(entry.nOrderPos, CWallet::TxPair((CWalletTx*)0, &entry)));
+    }
+
+    if (result == DB_LOAD_OK && pwallet->blinding_derivation_key.IsNull()) {
+        CKey key;
+        key.MakeNewKey(true);
+        uint256 keybin;
+        memcpy(keybin.begin(), key.begin(), key.size());
+        pwallet->blinding_derivation_key = keybin;
+        if (!WriteBlindingDerivationKey(pwallet->blinding_derivation_key)) {
+            result = DB_LOAD_FAIL;
+        }
     }
 
     return result;
@@ -906,7 +957,7 @@ bool CWalletDB::Recover(CDBEnv& dbenv, const std::string& filename, bool fOnlyKe
                 // Required in LoadKeyMetadata():
                 LOCK(dummyWallet.cs_wallet);
                 fReadOK = ReadKeyValue(&dummyWallet, ssKey, ssValue,
-                                        wss, strType, strErr);
+                                       wss, strType, strErr);
             }
             if (!IsKeyType(strType) && strType != "hdchain")
                 continue;
